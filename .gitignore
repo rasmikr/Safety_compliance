@@ -5,7 +5,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-
+files/output/
+runs/detect/api_outputs/
+state/locks/
 # Virtual environments
 venv/
 .venv/

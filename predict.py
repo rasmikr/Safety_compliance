@@ -235,6 +235,9 @@ def main():
         print("=" * 60)
         _run_image_inference(model, args)
 
+# from ultralytics import YOLO
+# m = YOLO("runs/detect/ppe_detection/weights/best.pt")
+# print(m.names)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,27 @@
+default_input_path: files/input
+default_output_path: files/output
+poll_interval_seconds: 30
+device: ''
+conf: 0.25
+imgsz: 640
+video:
+  frame_skip: 10
+image:
+  format: jpg
+supported_media:
+  video_exts:
+  - .mp4
+  - .avi
+  - .mov
+  - .mkv
+  - .webm
+  image_exts:
+  - .jpg
+  - .jpeg
+  - .png
+  - .svg
+  - .webp
+display_classes: []
+strict_overlays:
+  show_inferred_violations: true
+  filter_inferred_by_display_classes: true

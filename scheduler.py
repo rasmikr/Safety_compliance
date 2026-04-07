@@ -39,14 +39,27 @@ from config.settings import (
     DEFAULT_IMGSZ,
     DEFAULT_DEVICE,
     DEFAULT_FRAME_SKIP,
-    DEFAULT_MODEL,
     VIDEO_EXTENSIONS,
-    CLASS_NAMES,
-    WORN_PPE_CLASSES,
-    MISSING_PPE_CLASSES,
+    SHOW_INFERRED_VIOLATIONS,
+    FILTER_INFERRED_BY_DISPLAY_CLASSES,
+    DISPLAY_CLASSES,
+    DISPLAY_MISSING_LABELS,
 )
+from processing.worker import DETECT_IMAGE_REPORT_FIELDNAMES, csv_row_for_detect_frame
 from utils.visualization import annotate_frame
 from utils.compliance_logic import check_compliance_strict
+
+
+def _filter_inferred_label(label: str) -> str:
+    """Filter inferred no_* labels based on env settings."""
+    if not SHOW_INFERRED_VIOLATIONS:
+        return ""
+    if not FILTER_INFERRED_BY_DISPLAY_CLASSES or not DISPLAY_CLASSES:
+        return label
+
+    parts = [p.strip() for p in label.split(",") if p.strip()]
+    filtered = [p for p in parts if p in DISPLAY_MISSING_LABELS]
+    return ", ".join(filtered)
 
 # ──────────────────────────────────────────────────────────────
 # Log helpers
@@ -109,46 +122,6 @@ def _discover_new_videos(processed: set[str]) -> list[Path]:
 # ──────────────────────────────────────────────────────────────
 # Processing
 # ──────────────────────────────────────────────────────────────
-
-def _build_csv_row(frame_no: int, frame_skip: int, fps: float, result, summary: dict) -> dict:
-    """Build a single CSV row dict from a YOLO result + Compliance Summary."""
-    
-    # We use the summary passed to us, because it contains the STRICT inference results.
-    # The original result object only contains raw detections.
-
-    # Format person details (for debugging/visuals)
-    persons = []
-    if result.boxes is not None:
-        for box in result.boxes:
-            if int(box.cls[0]) == 6: # Person
-                persons.append(f"Person:{float(box.conf[0]):.3f}")
-
-    # Format Worn PPE
-    worn_strings = []
-    for name, count in summary["worn_ppe"].items():
-        if count == 1:
-            worn_strings.append(name)
-        else:
-            worn_strings.append(f"{name}({count})")
-            
-    # Format Missing PPE
-    missing_strings = []
-    for name, count in summary["missing_ppe"].items():
-        if count == 1:
-            missing_strings.append(name)
-        else:
-            missing_strings.append(f"{name}({count})")
-
-    return {
-        "frame_no": frame_no,
-        "frame_skip_rate": frame_skip,
-        "video_fps": round(fps, 2),
-        "person_count": summary["total_persons"],
-        "person_details": "; ".join(persons) if persons else "",
-        "worn_ppe": "; ".join(worn_strings) if worn_strings else "",
-        "missing_ppe": "; ".join(missing_strings) if missing_strings else "",
-    }
-
 
 def process_video(
     model: YOLO,
@@ -215,9 +188,9 @@ def process_video(
             # Use STRICT LOGIC to separate detections and find violations
             summary, annotations = check_compliance_strict(result)
 
-            # Build CSV row
-            row = _build_csv_row(frame_idx, frame_skip, fps, result, summary)
-            csv_rows.append(row)
+            csv_rows.append(
+                csv_row_for_detect_frame(frame_idx, frame_skip, fps, result, summary)
+            )
 
             # Annotate and write frame
             annotated = annotate_frame(frame, result, conf_threshold=conf)
@@ -227,9 +200,12 @@ def process_video(
             # ---------------------------------------------------------
             for ann in annotations:
                 # ann = {'box': [x1, y1, x2, y2], 'label': 'no_helmet', 'color': (0,0,220)}
+                filtered_label = _filter_inferred_label(ann["label"])
+                if not filtered_label:
+                    continue
                 x1, y1, x2, y2 = map(int, ann["box"])
                 color = ann["color"]
-                label = ann["label"]
+                label = filtered_label
                 
                 # Draw box (maybe dashed or thinner to distinguish? or just red)
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
@@ -255,9 +231,14 @@ def process_video(
             if not summary["is_compliant"]:
                 total_violations += 1
                 # List missing items
-                missing_str = ", ".join(summary["missing_ppe"].keys())
-                cv2.putText(annotated, f"Missing: {missing_str}", (20, 80),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                missing_labels = list(summary["missing_ppe"].keys())
+                if SHOW_INFERRED_VIOLATIONS:
+                    if FILTER_INFERRED_BY_DISPLAY_CLASSES and DISPLAY_CLASSES:
+                        missing_labels = [x for x in missing_labels if x in DISPLAY_MISSING_LABELS]
+                    if missing_labels:
+                        missing_str = ", ".join(missing_labels)
+                        cv2.putText(annotated, f"Missing: {missing_str}", (20, 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
             writer.write(annotated)
             processed_count += 1
@@ -271,13 +252,9 @@ def process_video(
     cap.release()
     writer.release()
 
-    # Write CSV
-    fieldnames = ["frame_no", "frame_skip_rate", "video_fps",
-                  "person_count", "person_details", "worn_ppe", "missing_ppe"]
-    
     try:
         with open(csv_out_path, "w", newline="") as fh:
-            csv_writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            csv_writer = csv.DictWriter(fh, fieldnames=DETECT_IMAGE_REPORT_FIELDNAMES)
             csv_writer.writeheader()
             csv_writer.writerows(csv_rows)
     except PermissionError:
@@ -320,14 +297,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def _resolve_model(model_arg: str | None) -> str:
-    """Resolve model path: CLI arg → trained weights → default pretrained."""
+    """Resolve model path: CLI arg → default (best.pt if present, else pretrained name)."""
     if model_arg:
         return model_arg
-    from config.settings import DEFAULT_PROJECT
-    best = Path(DEFAULT_PROJECT) / "ppe_detection" / "weights" / "best.pt"
-    if best.exists():
-        return str(best)
-    return DEFAULT_MODEL
+    from config.settings import default_model_path
+
+    return default_model_path()
 
 
 def main():
